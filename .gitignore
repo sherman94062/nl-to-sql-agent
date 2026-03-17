@@ -1,5 +1,6 @@
 .env
 .venv/
+*.sql
 __pycache__/
 *.pyc
 *.pyo

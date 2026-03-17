@@ -12,7 +12,7 @@ from rich.syntax import Syntax
 from rich.table import Table
 
 from agent.sql_generator import SQLGenerationError, UnsafeSQLError, generate_sql
-from db.schema import execute_query, get_display_name, get_engine
+from db.schema import execute_query, get_display_name, get_engine, get_schema_description
 
 load_dotenv()
 
@@ -21,6 +21,9 @@ console = Console()
 _HELP_TEXT = """\
 [bold]Meta-commands[/bold] (start with /)
   [cyan]/db[/cyan]                        Show current connection
+  [cyan]/tables[/cyan]                    List all tables (with row counts)
+  [cyan]/schema[/cyan]                    Show full schema for all tables
+  [cyan]/schema <table>[/cyan]            Show schema for one table
   [cyan]/connect <url>[/cyan]             Switch to PostgreSQL
                                e.g.  /connect postgresql://user:pass@localhost:5432/mydb
   [cyan]/connect sqlite[/cyan]            Switch back to SQLite (demo database)
@@ -73,6 +76,79 @@ def _print_results(rows: list[dict]) -> None:
 
 
 # ---------------------------------------------------------------------------
+# /tables and /schema display
+# ---------------------------------------------------------------------------
+
+def _cmd_tables() -> None:
+    """Print all tables with row counts."""
+    engine = get_engine()
+    try:
+        if engine == "postgresql":
+            rows = execute_query("""
+                SELECT table_name
+                FROM information_schema.tables
+                WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
+                ORDER BY table_name
+            """)
+            table_names = [r["table_name"] for r in rows]
+        else:
+            rows = execute_query(
+                "SELECT name FROM sqlite_master "
+                "WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
+            )
+            table_names = [r["name"] for r in rows]
+    except Exception as exc:
+        console.print(f"[bold red]Error listing tables:[/bold red] {exc}")
+        return
+
+    if not table_names:
+        console.print("[dim]No tables found.[/dim]")
+        return
+
+    t = Table(box=box.ROUNDED, show_header=True, header_style="bold cyan")
+    t.add_column("Table")
+    t.add_column("Rows", justify="right")
+
+    for name in table_names:
+        try:
+            count = execute_query(f'SELECT COUNT(*) AS n FROM "{name}"')[0]["n"]
+        except Exception:
+            count = "?"
+        t.add_row(name, str(count))
+
+    console.print(t)
+
+
+def _cmd_schema(table_filter: str | None = None) -> None:
+    """Print schema description, optionally filtered to one table."""
+    try:
+        full = get_schema_description()
+    except Exception as exc:
+        console.print(f"[bold red]Error fetching schema:[/bold red] {exc}")
+        return
+
+    if table_filter:
+        # Extract just the block for the requested table
+        needle = f"Table: {table_filter}"
+        lines = full.splitlines()
+        start = next((i for i, l in enumerate(lines) if l.strip().lower() == needle.lower()), None)
+        if start is None:
+            console.print(f"[yellow]Table '{table_filter}' not found. Use /tables to list available tables.[/yellow]")
+            return
+        # Collect lines until the next blank-then-Table or end
+        block = []
+        for line in lines[start:]:
+            if block and line.startswith("Table:") and line != lines[start]:
+                break
+            block.append(line)
+        output = "\n".join(block).strip()
+    else:
+        output = full.strip()
+
+    console.print(Panel(output, title="Schema", border_style="dim"))
+
+
+# ---------------------------------------------------------------------------
 # Meta-command handler
 # ---------------------------------------------------------------------------
 
@@ -87,6 +163,14 @@ def _handle_meta(command: str) -> bool:
 
     if cmd == "/db":
         console.print(_connection_line())
+        return True
+
+    if cmd == "/tables":
+        _cmd_tables()
+        return True
+
+    if cmd == "/schema":
+        _cmd_schema(parts[1] if len(parts) > 1 else None)
         return True
 
     if cmd == "/connect":

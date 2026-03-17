@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """CLI for the NL-to-SQL agent."""
 
-import sqlite3
 import sys
 
 from dotenv import load_dotenv
@@ -12,8 +11,7 @@ from rich.syntax import Syntax
 from rich.table import Table
 
 from agent.sql_generator import SQLGenerationError, UnsafeSQLError, generate_sql
-from db.schema import get_connection
-from db.seed import seed_db
+from db.schema import execute_query, get_display_name, get_engine
 
 load_dotenv()
 
@@ -28,18 +26,22 @@ def _confidence_color(confidence: float) -> str:
     return "red"
 
 
-def _print_results(rows: list[sqlite3.Row]) -> None:
+def _engine_color(engine: str) -> str:
+    return "blue" if engine == "postgresql" else "cyan"
+
+
+def _print_results(rows: list[dict]) -> None:
     if not rows:
         console.print("[dim]No rows returned.[/dim]")
         return
 
-    cols = rows[0].keys()
+    cols = list(rows[0].keys())
     table = Table(box=box.ROUNDED, show_header=True, header_style="bold cyan")
     for col in cols:
         table.add_column(str(col))
 
     for row in rows:
-        table.add_row(*[str(v) if v is not None else "[dim]NULL[/dim]" for v in row])
+        table.add_row(*[str(v) if v is not None else "[dim]NULL[/dim]" for v in row.values()])
 
     console.print(table)
     console.print(f"[dim]{len(rows)} row(s) returned[/dim]")
@@ -73,10 +75,8 @@ def run_query(question: str) -> None:
 
     # --- Execute ---
     try:
-        conn = get_connection()
-        rows = conn.execute(result.sql).fetchall()
-        conn.close()
-    except sqlite3.Error as exc:
+        rows = execute_query(result.sql)
+    except Exception as exc:
         console.print(f"[bold red]Execution error:[/bold red] {exc}")
         return
 
@@ -84,13 +84,21 @@ def run_query(question: str) -> None:
     console.print()
 
 
-def interactive_loop() -> None:
-    console.print(Panel(
-        "[bold cyan]NL-to-SQL Agent[/bold cyan]\n"
-        "[dim]Ask questions in plain English about the e-commerce database.\n"
-        "Type [bold]exit[/bold] or press Ctrl-C to quit.[/dim]",
+def _header_panel() -> Panel:
+    engine = get_engine()
+    display = get_display_name()
+    color = _engine_color(engine)
+    engine_label = "PostgreSQL" if engine == "postgresql" else "SQLite"
+    return Panel(
+        f"[bold cyan]NL-to-SQL Agent[/bold cyan]\n"
+        f"[dim]Connected to:[/dim] [{color}]{engine_label}[/{color}]  [dim]{display}[/dim]\n"
+        f"[dim]Ask questions in plain English. Type [bold]exit[/bold] or Ctrl-C to quit.[/dim]",
         border_style="cyan",
-    ))
+    )
+
+
+def interactive_loop() -> None:
+    console.print(_header_panel())
 
     while True:
         try:
@@ -109,14 +117,22 @@ def interactive_loop() -> None:
 
 
 def main() -> None:
-    # Ensure DB exists and is seeded
-    try:
-        seed_db()
-    except Exception as exc:
-        console.print(f"[yellow]Warning: DB seed skipped — {exc}[/yellow]")
+    # Only seed the demo SQLite DB; skip if pointed at PostgreSQL
+    if get_engine() == "sqlite":
+        try:
+            from db.seed import seed_db
+            seed_db()
+        except Exception as exc:
+            console.print(f"[yellow]Warning: DB seed skipped — {exc}[/yellow]")
 
     if len(sys.argv) > 1:
-        # Non-interactive: question passed as CLI argument(s)
+        engine = get_engine()
+        display = get_display_name()
+        color = _engine_color(engine)
+        engine_label = "PostgreSQL" if engine == "postgresql" else "SQLite"
+        console.print(
+            f"[dim]Connected to:[/dim] [{color}]{engine_label}[/{color}]  [dim]{display}[/dim]"
+        )
         question = " ".join(sys.argv[1:])
         run_query(question)
     else:

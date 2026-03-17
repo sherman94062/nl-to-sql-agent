@@ -1,4 +1,4 @@
-"""SQL generator: converts natural language questions to SQLite queries via Claude."""
+"""SQL generator: converts natural language questions to SQL via Claude."""
 
 import os
 import re
@@ -15,72 +15,6 @@ _UNSAFE_PATTERN = re.compile(
     r"\b(DROP|DELETE|TRUNCATE|ALTER|INSERT|UPDATE|CREATE|REPLACE|ATTACH)\b",
     re.IGNORECASE,
 )
-
-SCHEMA_DESCRIPTION = """
-E-commerce SQLite database schema:
-
-Table: customers
-  - id          INTEGER PRIMARY KEY AUTOINCREMENT
-  - name        TEXT NOT NULL
-  - email       TEXT UNIQUE NOT NULL
-  - phone       TEXT
-  - address     TEXT
-  - city        TEXT
-  - state       TEXT        -- 2-letter US abbreviation, e.g. 'CA', 'OR', 'TX'
-  - country     TEXT
-  - created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-
-Table: products
-  - id          INTEGER PRIMARY KEY AUTOINCREMENT
-  - name        TEXT NOT NULL
-  - description TEXT
-  - category    TEXT NOT NULL
-  - price       REAL NOT NULL
-  - sku         TEXT UNIQUE NOT NULL
-
-Table: inventory
-  - id          INTEGER PRIMARY KEY AUTOINCREMENT
-  - product_id  INTEGER NOT NULL REFERENCES products(id)
-  - quantity    INTEGER NOT NULL DEFAULT 0
-  - warehouse   TEXT NOT NULL
-  - updated_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-
-Table: orders
-  - id           INTEGER PRIMARY KEY AUTOINCREMENT
-  - customer_id  INTEGER NOT NULL REFERENCES customers(id)
-  - status       TEXT NOT NULL  -- one of: pending, processing, shipped, delivered, cancelled
-  - total_amount REAL NOT NULL
-  - created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-  - shipped_at   TIMESTAMP
-
-Table: order_items
-  - id          INTEGER PRIMARY KEY AUTOINCREMENT
-  - order_id    INTEGER NOT NULL REFERENCES orders(id)
-  - product_id  INTEGER NOT NULL REFERENCES products(id)
-  - quantity    INTEGER NOT NULL
-  - unit_price  REAL NOT NULL
-
-Relationships:
-  - orders.customer_id → customers.id
-  - order_items.order_id → orders.id
-  - order_items.product_id → products.id
-  - inventory.product_id → products.id
-"""
-
-SYSTEM_PROMPT = f"""You are an expert SQL assistant specializing in SQLite.
-Convert natural language questions into correct, efficient SQLite SELECT queries.
-
-{SCHEMA_DESCRIPTION}
-
-Rules:
-- Generate ONLY SELECT queries — never INSERT, UPDATE, DELETE, DROP, TRUNCATE, ALTER, or CREATE.
-- Use proper SQLite syntax (e.g., strftime for dates, LIKE for pattern matching).
-- Use table aliases when joining multiple tables for readability.
-- Include ORDER BY when the question implies ranked or sorted results.
-- Use LIMIT when the question asks for "top N" or "most/least".
-- Set confidence (0.0–1.0) to reflect how certain you are the query answers the question correctly.
-  Use lower confidence when the question is ambiguous or requires assumptions.
-"""
 
 
 class SQLResult(BaseModel):
@@ -107,11 +41,34 @@ def validate_sql_safety(sql: str) -> None:
         )
 
 
+def _build_system_prompt(schema: str, engine: str) -> str:
+    dialect = "PostgreSQL" if engine == "postgresql" else "SQLite"
+    date_hint = (
+        "Use NOW(), CURRENT_DATE, and INTERVAL for date arithmetic."
+        if engine == "postgresql"
+        else "Use strftime('%Y-%m-%d', 'now') and datetime('now', '-N days') for date arithmetic."
+    )
+    return f"""You are an expert SQL assistant specializing in {dialect}.
+Convert natural language questions into correct, efficient {dialect} SELECT queries.
+
+{schema}
+
+Rules:
+- Generate ONLY SELECT queries — never INSERT, UPDATE, DELETE, DROP, TRUNCATE, ALTER, or CREATE.
+- Use proper {dialect} syntax. {date_hint}
+- Use table aliases when joining multiple tables for readability.
+- Include ORDER BY when the question implies ranked or sorted results.
+- Use LIMIT when the question asks for "top N" or "most/least".
+- Set confidence (0.0–1.0) to reflect how certain you are the query answers the question correctly.
+  Use lower confidence when the question is ambiguous or requires assumptions.
+"""
+
+
 def generate_sql(question: str) -> SQLResult:
     """Generate a SQL query from a natural language question.
 
-    Args:
-        question: Natural language question about the e-commerce database.
+    Introspects the configured database (SQLite or PostgreSQL) for schema context
+    and asks Claude to generate the appropriate dialect.
 
     Returns:
         SQLResult with sql, explanation, and confidence.
@@ -120,6 +77,8 @@ def generate_sql(question: str) -> SQLResult:
         UnsafeSQLError: If the generated SQL contains mutating operations.
         SQLGenerationError: If the model fails to return a valid structured response.
     """
+    from db.schema import get_engine, get_schema_description
+
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
         raise SQLGenerationError(
@@ -127,12 +86,15 @@ def generate_sql(question: str) -> SQLResult:
             "Copy .env.example to .env and add your key."
         )
 
-    client = anthropic.Anthropic(api_key=api_key)
+    engine = get_engine()
+    schema = get_schema_description()
+    system_prompt = _build_system_prompt(schema, engine)
 
+    client = anthropic.Anthropic(api_key=api_key)
     response = client.messages.parse(
         model="claude-sonnet-4-6",
         max_tokens=1024,
-        system=SYSTEM_PROMPT,
+        system=system_prompt,
         messages=[{"role": "user", "content": question}],
         output_format=SQLResult,
     )

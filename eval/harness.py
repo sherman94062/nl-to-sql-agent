@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import sqlite3
 import time
 from dataclasses import dataclass, field
 from typing import Any
 
 from agent.sql_generator import SQLGenerationError, SQLResult, generate_sql
-from db.schema import get_connection
+from db.schema import execute_query
 
 
 @dataclass
@@ -53,22 +52,19 @@ class EvalResult:
 
 def run_eval(cases: list[EvalCase]) -> list[EvalResult]:
     """Run a list of eval cases and return results."""
-    conn = get_connection()
     results: list[EvalResult] = []
 
     for case in cases:
         t0 = time.monotonic()
         try:
             sql_result = generate_sql(case.question)
-            rows_raw = conn.execute(sql_result.sql).fetchall()
-            rows = [dict(r) for r in rows_raw]
+            rows = execute_query(sql_result.sql)
             latency = (time.monotonic() - t0) * 1000
             results.append(EvalResult(case=case, sql_result=sql_result, rows=rows, latency_ms=latency))
-        except (SQLGenerationError, sqlite3.Error) as exc:
+        except Exception as exc:
             latency = (time.monotonic() - t0) * 1000
             results.append(EvalResult(case=case, error=str(exc), latency_ms=latency))
 
-    conn.close()
     return results
 
 
